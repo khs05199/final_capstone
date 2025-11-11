@@ -167,7 +167,7 @@ if 'selected_parking' not in st.session_state:
 #===========================================================
 
 #2. 지도 구역
-st.markdown("## ☀️⚡ 태양광 & 혼잡도 반영 공영주차장 EV충전소 위치추천 대시보드")
+st.markdown("## ☀️⚡ 일사량 & 혼잡도 반영 친환경 EV충전소 위치추천 대시보드(공영 주차장)")
 st.markdown(""""
     <style>
     [data-testid="stHorizontalBlock"] {

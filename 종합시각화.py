@@ -328,16 +328,6 @@ with col2:
 
 #4. 혼잡도 그래프
 with col3:
-    st.markdown(
-        """
-        <div style="
-            background-color: #d6f0ff;  /* 연한 하늘색 */
-            border-radius: 15px; 
-            padding: 15px;
-            box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-        ">
-        """, unsafe_allow_html=True
-    )
 
     st.subheader("🕒 요일별 시간대 혼잡도 추이")
 

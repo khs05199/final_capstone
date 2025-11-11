@@ -1,0 +1,393 @@
+#1. 필요라이브러 가져오기
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+import pandas as pd
+import numpy as np
+from folium import Icon
+#===========================================================
+#===========================================================
+
+#2. 데이터 경로 설정
+MAIN_DATA_PATH = '태양광_일사량 및 주차 구획수.xlsx' 
+CONGESTION_DATA_PATH = '혼잡도_요일별_시간별_요약.xlsx'
+
+#===========================================================
+#===========================================================
+
+#3. 고정 파라미터 설정
+EV_COUNT_PER_DAY = 4 
+#EV 평균 배터리 용량 
+EV_BATTERY_KWH = 80 
+#태양광으로 충당할 전체 충전량 비율 
+PV_TARGET_RATIO = 0.30 
+#ESS round-trip efficiency 
+ESS_RTE = 0.85 
+#태양광 모듈 효율 
+PV_EFFICIENCY = 0.18 
+#인버터 및 시스템 손실 반영 
+SYSTEM_LOSS = 0.80 
+#한 주차구획 면적 (m²) 
+PARKING_AREA_PER_SLOT = 12.5 
+# 1년 
+DAYS_PER_YEAR = 365
+
+#===========================================================
+#===========================================================
+
+# 4.태양광 일사량 적합도 분류
+def calculate_pv_requirements(file_path):
+    # 데이터 불러오기
+    df = pd.read_excel(file_path)
+    
+    #하루 목표 태양광 발전량 (ESS 효율 반영)
+    daily_ev_demand = EV_COUNT_PER_DAY * EV_BATTERY_KWH
+    target_pv_energy = daily_ev_demand * PV_TARGET_RATIO
+    required_pv_output = target_pv_energy / ESS_RTE  # kWh/day
+    
+    #주차장별 계산 수행
+    df["㎡당_일평균_발전량(kWh/m²/day)"] = (
+        df["㎡당 연간 일사량(kWh/m²/yr)"] * PV_EFFICIENCY * SYSTEM_LOSS / DAYS_PER_YEAR
+    )
+    
+    df["필요패널면적(m²)"] = required_pv_output / df["㎡당_일평균_발전량(kWh/m²/day)"]
+    df["필요구획수"] = df["필요패널면적(m²)"] / PARKING_AREA_PER_SLOT
+
+    #적합/부적합 기준 분류
+    df["태양광 적합 여부"] = df.apply(
+        lambda row: (
+            "부적합" if (row["필요구획수"] < 80 and row["필요구획수"] > row["총주차면수"] * 0.5)
+            else "적합"
+        ),
+        axis=1
+    )
+    
+    #정리
+    result = df[
+        [
+            "주차장_ID", "지번주소", "주차장명", "총주차면수",
+            "㎡당 연간 일사량(kWh/m²/yr)",
+            "필요패널면적(m²)", "필요구획수", "태양광 적합 여부",
+            "위도", "경도"
+        ]
+    ]
+    
+    return result.round(2)
+
+#===========================================================
+#===========================================================
+
+#5. 혼잡도 상태 분류
+def classify_congestion(pv_df, congestion_file_path):
+    #혼잡도 엑셀 파일의 모든 시트 읽기 (월~일)
+    sheets = pd.read_excel(congestion_file_path, sheet_name=None, index_col=0)
+
+    #모든 요일 시트의 합계를 계산
+    total_congestion = None
+    for day, df_day in sheets.items():
+        # % 기호 제거 및 float 변환
+        df_day = df_day.replace('%', '', regex=True).astype(float)
+        
+        if total_congestion is None:
+            total_congestion = df_day
+        else:
+            total_congestion += df_day
+    
+    #주차장별 일주일 총합 평균 (시간별 평균을 통해)
+    weekly_avg_congestion = total_congestion.mean(axis=0)  # axis=0 → 주차장별 평균
+    
+    #0~1 정규화
+    min_val, max_val = weekly_avg_congestion.min(), weekly_avg_congestion.max()
+    normalized = (weekly_avg_congestion - min_val) / (max_val - min_val)
+    
+    #혼잡도 라벨링
+    def congestion_label(x):
+        if pd.isna(x):
+            return np.nan
+        elif x < 0.7:
+            return '여유'
+        elif x < 0.9:
+            return '보통'
+        else:
+            return '혼잡'
+    
+    congestion_labels = normalized.apply(congestion_label)
+    
+    #DataFrame으로 변환
+    congestion_df = pd.DataFrame({
+        '주차장_ID': normalized.index,
+        '정규화_혼잡도': normalized.values,
+        '혼잡도': congestion_labels.values
+    })
+    
+    # 7️⃣ 태양광 부적합 주차장은 혼잡도 NaN 처리
+    merged = pv_df.merge(congestion_df, on='주차장_ID', how='left')
+    merged.loc[merged['태양광 적합 여부'] == '부적합', ['정규화_혼잡도', '혼잡도']] = np.nan
+    
+    return merged
+
+#===========================================================
+#===========================================================
+
+#6. 최종 선별 데이터 프레임 
+#태양광 및 ESS 관련 계산
+pv_df = calculate_pv_requirements('태양광_일사량 및 주차 구획수.xlsx')
+
+#혼잡도 데이터 기반 차량 흐름 분류
+car_df = classify_congestion(pv_df, CONGESTION_DATA_PATH)
+
+columns_to_display = [
+    '주차장_ID', '주차장명', '지번주소', '총주차면수',
+    '㎡당 연간 일사량(kWh/m²/yr)', '필요패널면적(m²)', '필요구획수',
+    '태양광 적합 여부', '정규화_혼잡도', '혼잡도', '위도', '경도'
+]
+
+# 컬럼 순서 정리
+final_df = car_df[columns_to_display]
+
+# 인덱스 초기화
+final_df.reset_index(drop=True, inplace=True)
+
+#===========================================================
+#===========================================================
+#####시각화
+#===========================================================
+#===========================================================
+
+#1. 세션 초기화
+st.set_page_config(
+    page_title="대구시 공영주차장 통합 대시보드",
+    layout="wide",  # 👈 전체 폭 사용
+    initial_sidebar_state="collapsed"
+)
+if 'selected_parking' not in st.session_state:
+    st.session_state.selected_parking = None
+
+#===========================================================
+#===========================================================
+
+#2. 지도 구역
+st.markdown("## ☀️⚡ 대구시 공영주차장 태양광 적합 및 혼잡도 대시보드")
+st.markdown(""""
+    <style>
+    [data-testid="stHorizontalBlock"] {
+        gap: 0.5rem !important;  /* 컬럼 간 간격 줄이기 */
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+col1, col3, col2 = st.columns([4.5, 3.5, 2.5])
+
+with col1:
+    st.subheader("🗺️ 주차장 지도")
+    
+    st.markdown(
+        "대구광역시에 위치한 공영주차장 중 지상 노외 주차장들의 위치입니다. "
+        "마커를 클릭하면 해당 주차장의 혼잡도 그래프와 상세 정보를 확인할 수 있습니다."
+    )
+    
+    # 지도 중심 계산
+    map_center = [final_df["위도"].mean(), final_df["경도"].mean()]
+    m = folium.Map(location=map_center, zoom_start=13)
+
+    # 마커 색상 지정 함수
+    def get_marker_color(row):
+        # 태양광 부적합 → 검정
+        if row["태양광 적합 여부"] == "부적합":
+            return "black"
+        # 혼잡도에 따른 색상
+        elif row["혼잡도"] == "혼잡":
+            return "red"
+        elif row["혼잡도"] == "보통":
+            return "orange"  # folium에 'yellow'가 잘 안 보이므로 orange가 가시성 좋음
+        elif row["혼잡도"] == "여유":
+            return "blue"
+        else:
+            return "gray"  # 혼잡도 정보가 없을 때
+
+    # 마커 추가
+    for idx, row in final_df.iterrows():
+        color = get_marker_color(row)
+        
+        # HTML 팝업
+        html = f"""
+        <div style="
+            font-family: Arial; 
+            font-size: 14px; 
+            line-height: 1.5; 
+            background-color: white; 
+            border: 2px solid {color};
+            border-radius: 8px;
+            padding: 8px;
+            width: 220px;
+        ">
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+                <span style="font-size:16px;">&#128664;</span> <!-- 자동차 아이콘 -->
+                <b>주차장명:</b> {row['주차장명']}
+            </div>
+            <div><b>혼잡도:</b> {row['혼잡도']}</div>
+            <div><b>태양광 적합 여부:</b> {row['태양광 적합 여부']}</div>
+        </div>
+        """
+        
+        iframe = folium.IFrame(html, width=300, height=110)
+        popup = folium.Popup(iframe, max_width=300)
+
+        folium.Marker(
+            location=[row["위도"], row["경도"]],
+            popup=popup,
+            tooltip=row["주차장_ID"],
+            icon=folium.Icon(color=color, icon="info-sign", prefix="glyphicon")
+        ).add_to(m)
+
+    # 지도 표시 및 클릭 이벤트
+    map_data = st_folium(m, width=900, height=650)
+
+    # 클릭 시 가장 가까운 주차장 탐색
+    if map_data["last_clicked"]:
+        lat, lon = map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"]
+
+        temp_df = final_df.copy()
+        temp_df["거리"] = ((temp_df["위도"] - lat)**2 + (temp_df["경도"] - lon)**2)**0.5
+        nearest = temp_df.loc[temp_df["거리"].idxmin()]
+
+        st.session_state.selected_parking = nearest["주차장_ID"]
+
+    # =========================
+    # 지도 범례 박스
+    # =========================
+    st.markdown(
+    """
+    <div style="
+        background-color: white;
+        border-radius: 10px;
+        padding: 10px;
+        width: auto;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.15);
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        margin-top: 10px;
+    ">
+        <div style="color:black; text-align:center;">⬤<br>태양광 부적합</div>
+        <div style="color:red; text-align:center;">⬤<br>혼잡</div>
+        <div style="color:orange; text-align:center;">⬤<br>보통</div>
+        <div style="color:blue; text-align:center;">⬤<br>여유</div>
+    </div>
+    """, unsafe_allow_html=True
+    )
+
+# -------------------------------------------------------
+# -------------------------------------------------------
+
+# 3. 📊 상세 정보 구역
+with col2:
+    
+    st.subheader("📊 선택 주차장 상세 정보")
+    
+    # 선택 초기화 버튼
+    if st.button("선택 초기화 🔄"):
+        st.session_state.selected_parking = None
+        st.rerun()
+
+    # 선택된 주차장 정보 표시
+    if st.session_state.selected_parking:
+        # 안전 체크: 해당 ID가 실제로 존재하는지 확인
+        matched_rows = final_df[final_df["주차장_ID"] == st.session_state.selected_parking]
+
+        if not matched_rows.empty:
+            info = matched_rows.iloc[0]
+
+            st.markdown(f"**🏷️ 주차장명:** {info['주차장명']}")
+            st.markdown(f"**🆔 주차장 ID:** {info['주차장_ID']}")
+            st.markdown(f"**📍 주소:** {info['지번주소']}")
+            st.markdown(f"**🚗 총 주차면수:** {info['총주차면수']}")
+            st.markdown(f"**☀️㎡당 연간 일사량:** {info['㎡당 연간 일사량(kWh/m²/yr)']} kWh/m²/yr")
+            st.markdown(f"**🔋 필요패널면적:** {info['필요패널면적(m²)']} m²")
+            st.markdown(f"**🧩 필요구획수:** {info['필요구획수']}")
+            st.markdown(f"**🌞 태양광 적합 여부:** {info['태양광 적합 여부']}")
+
+            st.markdown("---")
+            st.markdown("**📈 혼잡도 상태:**")
+
+            if not pd.isna(info["정규화_혼잡도"]):
+                st.progress(int(info["정규화_혼잡도"] * 100))
+                st.markdown(f"**혼잡도 등급:** {info['혼잡도']} ({int(info['정규화_혼잡도'] * 100)}%)")
+            else:
+                st.warning("혼잡도 표시 불가 (태양광 부적합)")
+        else:
+            st.error("❌ 선택한 주차장 ID에 해당하는 데이터가 없습니다.")
+            st.session_state.selected_parking = None
+
+    else:
+        st.info("지도의 주차장을 클릭하면 상세 정보를 볼 수 있습니다.")
+
+    st.markdown("</div>", unsafe_allow_html=True)  # 박스 종료
+# -------------------------------------------------------
+# -------------------------------------------------------
+
+#4. 혼잡도 그래프
+with col3:
+    st.markdown(
+        """
+        <div style="
+            background-color: #d6f0ff;  /* 연한 하늘색 */
+            border-radius: 15px; 
+            padding: 15px;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        ">
+        """, unsafe_allow_html=True
+    )
+
+    st.subheader("🕒 요일별 시간대 혼잡도 추이")
+
+    # 혼잡도 데이터 불러오기
+    @st.cache_data
+    def load_congestion_data():
+        sheets = pd.read_excel("혼잡도_요일별_시간별_요약.xlsx", sheet_name=None)
+        return sheets
+
+    congestion_sheets = load_congestion_data()
+    days = list(congestion_sheets.keys())
+
+    # 주차장 선택 확인
+    if st.session_state.selected_parking:
+        selected_id = st.session_state.selected_parking
+
+        # 요일 선택 박스
+        selected_day = st.selectbox("📅 요일 선택", days, index=0, key="day_selector")
+
+        # 선택한 요일의 시트 가져오기
+        congestion_df = congestion_sheets[selected_day]
+
+        # 시간 컬럼 이름이 자동으로 첫 번째일 가능성 처리
+        time_col = congestion_df.columns[0]
+
+        # 선택한 주차장이 해당 시트에 존재할 경우
+        if selected_id in congestion_df.columns:
+            df_plot = congestion_df[[time_col, selected_id]].copy()
+            df_plot.rename(columns={time_col: "시간", selected_id: "혼잡도"}, inplace=True)
+
+            import plotly.express as px
+
+            fig = px.line(
+                df_plot,
+                x="시간",
+                y="혼잡도",
+                markers=True,
+                title=f"📊 {selected_day} - {selected_id} 주차장 혼잡도 변화",
+            )
+            fig.update_layout(
+                xaxis_title="시간대 (시)",
+                yaxis_title="혼잡도 (%)",
+                template="plotly_white",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.warning("⚠️ 선택한 주차장은 이 요일의 데이터에 없습니다.")
+    else:
+        st.info("ℹ️ 지도의 마커를 클릭하면 주차장 혼잡도 추이를 볼 수 있습니다.")
+
+    st.markdown("</div>", unsafe_allow_html=True)  # 박스 종료

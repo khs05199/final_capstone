@@ -167,7 +167,7 @@ if 'selected_parking' not in st.session_state:
 #===========================================================
 
 #2. 지도 구역
-st.markdown("## ☀️⚡ 대구시 공영주차장 태양광 적합 및 혼잡도 대시보드")
+st.markdown("## ☀️⚡ 태양광 & 혼잡도 반영 공영주차장 EV충전소 위치추천 대시보드")
 st.markdown(""""
     <style>
     [data-testid="stHorizontalBlock"] {
